@@ -54,92 +54,45 @@ class ApifyGoogleJobsScraper(BaseScraper):
             return []
 
         client = ApifyClient(self.api_token)
-        all_jobs = []
-        seen_ids = set()
 
-        for keyword in SEARCH_QUERIES:
-            try:
-                logger.info(f"Apify: Searching '{keyword}'...")
-                jobs = self._search(client, keyword)
-                new_count = 0
-                for job in jobs:
-                    if job["external_id"] not in seen_ids:
-                        seen_ids.add(job["external_id"])
-                        all_jobs.append(job)
-                        new_count += 1
-                logger.info(f"Apify: '{keyword}' → {new_count} new jobs")
+        # Send ALL queries in a SINGLE actor run to save credits ($1 per run)
+        logger.info(f"Apify: Running single batch with {len(SEARCH_QUERIES)} queries...")
 
-                # Respect Apify rate limits + free tier credits
-                time.sleep(2)
-
-            except Exception as e:
-                logger.error(f"Apify: Error searching '{keyword}': {e}")
-
-        logger.info(f"Apify: Fetched {len(all_jobs)} unique jobs from Google Jobs")
-        return all_jobs
-
-    def _search(self, client, keyword: str) -> list[dict]:
-        """Run one Apify Google Jobs search."""
-        # Try the actor with multiple input format variations
-        run_input = {
-            "queries": [keyword],
-            "maxPagesPerQuery": 3,
-            "csvFriendlyOutput": False,
-            "languageCode": "en",
-            "countryCode": "us",
-        }
-
-        try:
-            # Primary actor: orgupdate/google-jobs-scraper
-            run = client.actor("orgupdate/google-jobs-scraper").call(
-                run_input=run_input,
-                timeout_secs=120,
-                memory_mbytes=256,
-            )
-
-            jobs = []
-            item_count = 0
-            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                item_count += 1
-                job = self._parse_job(item)
-                if job:
-                    jobs.append(job)
-
-            logger.info(f"Apify: Actor returned {item_count} items, parsed {len(jobs)} jobs")
-            return jobs
-
-        except Exception as e:
-            logger.error(f"Apify: Actor call failed: {e}")
-            # Fallback: try with alternative input format
-            return self._search_fallback(client, keyword)
-
-    def _search_fallback(self, client, keyword: str) -> list[dict]:
-        """Fallback search with alternative input format."""
         try:
             run_input = {
-                "countryName": "United States",
-                "includeKeyword": keyword,
-                "datePosted": "today",
-                "pagesToFetch": 3,
+                "queries": SEARCH_QUERIES,
+                "maxPagesPerQuery": 2,
+                "csvFriendlyOutput": False,
+                "languageCode": "en",
+                "countryCode": "us",
             }
 
             run = client.actor("orgupdate/google-jobs-scraper").call(
                 run_input=run_input,
-                timeout_secs=120,
-                memory_mbytes=256,
+                timeout_secs=300,
+                memory_mbytes=512,
             )
 
-            jobs = []
-            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-                job = self._parse_job(item)
-                if job:
-                    jobs.append(job)
+            all_jobs = []
+            seen_ids = set()
+            item_count = 0
 
-            logger.info(f"Apify: Fallback returned {len(jobs)} jobs")
-            return jobs
+            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+                item_count += 1
+                job = self._parse_job(item)
+                if job and job["external_id"] not in seen_ids:
+                    seen_ids.add(job["external_id"])
+                    all_jobs.append(job)
+
+            logger.info(f"Apify: Actor returned {item_count} items, parsed {len(all_jobs)} unique jobs")
+            return all_jobs
 
         except Exception as e:
-            logger.error(f"Apify: Fallback also failed: {e}")
+            error_msg = str(e)
+            if "usage" in error_msg.lower() or "limit" in error_msg.lower():
+                logger.warning(f"Apify: Monthly credits exhausted. Skipping until next cycle.")
+            else:
+                logger.error(f"Apify: Error: {e}")
             return []
 
     def _parse_job(self, item: dict) -> dict | None:
