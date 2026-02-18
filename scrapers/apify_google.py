@@ -4,33 +4,33 @@ Uses Apify's Google Jobs actor to scrape public Google Jobs search results.
 Google Jobs aggregates listings from LinkedIn, Indeed, Glassdoor, ZipRecruiter, and 20+ sites.
 
 Register free at: https://apify.com (free tier = $5/month compute credits)
-Actor: https://apify.com/orgupdate/google-jobs-scraper
 """
 import os
+import re
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
-# Tech job search queries to maximize coverage
+# Focused search queries with US locations for maximum coverage
 SEARCH_QUERIES = [
-    "software engineer",
-    "data scientist",
-    "data engineer",
-    "devops engineer",
-    "cloud engineer",
-    "cybersecurity analyst",
+    "software engineer United States",
+    "data scientist jobs USA",
+    "devops engineer remote USA",
+    "cybersecurity analyst United States",
+    "cloud engineer AWS Azure",
     "full stack developer",
     "machine learning engineer",
-    "frontend developer",
-    "backend developer",
-    "IT support specialist",
-    "systems administrator",
-    "network engineer",
+    "frontend developer React",
+    "backend developer Python Java",
     "QA engineer",
+    "IT support specialist",
+    "network engineer",
+    "systems administrator",
+    "data engineer",
     "product manager tech",
 ]
 
@@ -61,10 +61,13 @@ class ApifyGoogleJobsScraper(BaseScraper):
             try:
                 logger.info(f"Apify: Searching '{keyword}'...")
                 jobs = self._search(client, keyword)
+                new_count = 0
                 for job in jobs:
                     if job["external_id"] not in seen_ids:
                         seen_ids.add(job["external_id"])
                         all_jobs.append(job)
+                        new_count += 1
+                logger.info(f"Apify: '{keyword}' → {new_count} new jobs")
 
                 # Respect Apify rate limits + free tier credits
                 time.sleep(2)
@@ -77,78 +80,164 @@ class ApifyGoogleJobsScraper(BaseScraper):
 
     def _search(self, client, keyword: str) -> list[dict]:
         """Run one Apify Google Jobs search."""
+        # Try the actor with multiple input format variations
         run_input = {
-            "countryName": "usa",
-            "includeKeyword": keyword,
-            "datePosted": "today",  # Only jobs posted today (last 24hrs)
-            "pagesToFetch": 3,       # 3 pages per keyword (conserve credits)
+            "queries": [keyword],
+            "maxPagesPerQuery": 3,
+            "csvFriendlyOutput": False,
+            "languageCode": "en",
+            "countryCode": "us",
         }
 
-        # Run the actor and wait for completion (timeout 120s)
-        run = client.actor("orgupdate/google-jobs-scraper").call(
-            run_input=run_input,
-            timeout_secs=120,
-            memory_mbytes=256,
-        )
+        try:
+            # Primary actor: orgupdate/google-jobs-scraper
+            run = client.actor("orgupdate/google-jobs-scraper").call(
+                run_input=run_input,
+                timeout_secs=120,
+                memory_mbytes=256,
+            )
 
-        jobs = []
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-            job = self._parse_job(item)
-            if job:
-                jobs.append(job)
+            jobs = []
+            item_count = 0
+            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+                item_count += 1
+                job = self._parse_job(item)
+                if job:
+                    jobs.append(job)
 
-        return jobs
+            logger.info(f"Apify: Actor returned {item_count} items, parsed {len(jobs)} jobs")
+            return jobs
+
+        except Exception as e:
+            logger.error(f"Apify: Actor call failed: {e}")
+            # Fallback: try with alternative input format
+            return self._search_fallback(client, keyword)
+
+    def _search_fallback(self, client, keyword: str) -> list[dict]:
+        """Fallback search with alternative input format."""
+        try:
+            run_input = {
+                "countryName": "United States",
+                "includeKeyword": keyword,
+                "datePosted": "today",
+                "pagesToFetch": 3,
+            }
+
+            run = client.actor("orgupdate/google-jobs-scraper").call(
+                run_input=run_input,
+                timeout_secs=120,
+                memory_mbytes=256,
+            )
+
+            jobs = []
+            for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+                job = self._parse_job(item)
+                if job:
+                    jobs.append(job)
+
+            logger.info(f"Apify: Fallback returned {len(jobs)} jobs")
+            return jobs
+
+        except Exception as e:
+            logger.error(f"Apify: Fallback also failed: {e}")
+            return []
 
     def _parse_job(self, item: dict) -> dict | None:
         """Parse an Apify Google Jobs result into our standard format."""
         try:
-            title = (item.get("job_title") or item.get("title") or "").strip()
-            company = (item.get("company_name") or item.get("company") or "Unknown").strip()
+            # Handle various field name formats from different actor versions
+            title = (
+                item.get("title") or
+                item.get("job_title") or
+                item.get("positionName") or
+                ""
+            ).strip()
+
+            company = (
+                item.get("companyName") or
+                item.get("company_name") or
+                item.get("company") or
+                "Unknown"
+            ).strip()
+
             if not title:
                 return None
 
             # Location
-            location_str = item.get("location") or ""
+            location_str = (
+                item.get("location") or
+                item.get("jobLocation") or
+                ""
+            )
+
             city = self.extract_city(location_str)
             state = self.normalize_state(location_str)
 
             # Salary
-            salary_str = item.get("salary") or ""
+            salary_str = (
+                item.get("salary") or
+                item.get("salaryRange") or
+                ""
+            )
             salary_min, salary_max = self.parse_salary(salary_str)
 
             # Description
-            description = item.get("description") or item.get("job_description") or ""
-            import re
+            description = (
+                item.get("description") or
+                item.get("job_description") or
+                item.get("jobDescription") or
+                ""
+            )
             description = re.sub(r"<[^>]+>", " ", description)
             description = re.sub(r"\s+", " ", description).strip()
 
             # Work type
-            job_type = item.get("job_type") or item.get("employment_type") or ""
+            job_type = (
+                item.get("jobType") or
+                item.get("job_type") or
+                item.get("employment_type") or
+                item.get("employmentType") or
+                ""
+            )
             work_type = self.detect_work_type(title, description, location_str)
             if "remote" in job_type.lower():
                 work_type = "remote"
 
             # Apply URL
-            apply_url = item.get("url") or item.get("apply_link") or item.get("link") or ""
+            apply_url = (
+                item.get("applyLink") or
+                item.get("url") or
+                item.get("apply_link") or
+                item.get("link") or
+                ""
+            )
             # Some results have apply_options array
-            apply_options = item.get("apply_options") or []
+            apply_options = item.get("apply_options") or item.get("applyOptions") or []
             if apply_options and isinstance(apply_options, list) and len(apply_options) > 0:
-                apply_url = apply_options[0].get("link") or apply_url
+                first_option = apply_options[0]
+                if isinstance(first_option, dict):
+                    apply_url = first_option.get("link") or first_option.get("url") or apply_url
 
             # Date posted
-            date_str = item.get("date") or item.get("date_posted") or ""
+            date_str = (
+                item.get("datePosted") or
+                item.get("date") or
+                item.get("date_posted") or
+                item.get("postedAt") or
+                ""
+            )
             posted_at = self._parse_date(date_str)
 
-            # Source via (e.g., "via LinkedIn", "via Indeed")
-            posted_via = item.get("posted_via") or item.get("via") or "Google Jobs"
-
             # Generate a stable external ID
-            external_id = item.get("id") or item.get("job_id") or str(
-                hash(f"{title}|{company}|{location_str}")
+            external_id = (
+                item.get("id") or
+                item.get("jobId") or
+                item.get("job_id") or
+                str(hash(f"{title}|{company}|{location_str}"))
             )
 
             # Company logo
-            logo = item.get("company_logo") or item.get("thumbnail") or None
+            logo = item.get("companyLogo") or item.get("company_logo") or item.get("thumbnail") or None
 
             return {
                 "external_id": str(external_id),
@@ -181,22 +270,19 @@ class ApifyGoogleJobsScraper(BaseScraper):
         if not date_str:
             return None
 
-        date_str = date_str.lower().strip()
+        date_str = str(date_str).lower().strip()
 
         # Relative dates: "1 day ago", "2 hours ago", "just now"
-        import re
         if "just now" in date_str or "today" in date_str:
             return datetime.now(timezone.utc)
 
         hour_match = re.search(r"(\d+)\s*hour", date_str)
         if hour_match:
-            from datetime import timedelta
             hours = int(hour_match.group(1))
             return datetime.now(timezone.utc) - timedelta(hours=hours)
 
         day_match = re.search(r"(\d+)\s*day", date_str)
         if day_match:
-            from datetime import timedelta
             days = int(day_match.group(1))
             return datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -210,7 +296,6 @@ class ApifyGoogleJobsScraper(BaseScraper):
 
     def _extract_skills(self, description: str) -> list[str]:
         """Extract common tech skills from description."""
-        import re
         skill_patterns = [
             "Python", "Java", "JavaScript", "TypeScript", "C\\+\\+", "C#", "Go", "Rust",
             "React", "Angular", "Vue", "Node\\.js", "Django", "Flask", "FastAPI", "Spring",
@@ -226,8 +311,7 @@ class ApifyGoogleJobsScraper(BaseScraper):
         desc_text = description or ""
         for skill in skill_patterns:
             if re.search(r"\b" + skill + r"\b", desc_text, re.IGNORECASE):
-                # Use proper casing from our list
                 clean = skill.replace("\\+", "+").replace("\\.", ".")
                 found.append(clean)
 
-        return found[:15]  # Cap at 15 skills
+        return found[:15]
