@@ -77,10 +77,26 @@ def get_jobs(
     """
     query = db.query(Job).filter(Job.is_active == True)
 
-    # Full-text search
+    # Full-text search — two-phase: AND (exact) then OR (expanded)
     if q:
-        search_query = func.plainto_tsquery("english", q)
-        query = query.filter(Job.search_vector.op("@@")(search_query))
+        # Phase 1: strict AND — all words must appear
+        and_tsq = func.plainto_tsquery("english", q)
+        strict_count = (
+            db.query(func.count(Job.id))
+            .filter(Job.is_active == True, Job.search_vector.op("@@")(and_tsq))
+            .scalar()
+        )
+        if strict_count > 0:
+            query = query.filter(Job.search_vector.op("@@")(and_tsq))
+        else:
+            # Phase 2: OR fallback — any meaningful word matches
+            words = [w for w in q.strip().split() if len(w) > 1]
+            if words:
+                or_phrase = " OR ".join(words)
+                or_tsq = func.websearch_to_tsquery("english", or_phrase)
+                query = query.filter(Job.search_vector.op("@@")(or_tsq))
+            else:
+                query = query.filter(Job.search_vector.op("@@")(and_tsq))
 
     # Filters
     if category:
