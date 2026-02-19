@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager
 from typing import Optional
 from uuid import UUID
 
-from fastapi import FastAPI, Depends, Query, HTTPException, Header
+from fastapi import FastAPI, Depends, Query, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import func, text
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -167,6 +168,25 @@ def portal_stats(db: Session = Depends(get_db)):
 
 
 # ═══════════════════════════════════════════
+# ANALYTICS ENDPOINT (public — lightweight)
+# ═══════════════════════════════════════════
+
+@app.post("/api/track", status_code=204)
+async def track_event(request: Request, db: Session = Depends(get_db)):
+    """Receive a tracking event from the frontend."""
+    from models import PageEvent
+    try:
+        body = await request.json()
+        event = str(body.get("event", ""))[:50]
+        page  = str(body.get("page",  ""))[:100]
+        if event:
+            db.add(PageEvent(event=event, page=page))
+            db.commit()
+    except Exception:
+        pass  # never fail silently for analytics
+
+
+# ═══════════════════════════════════════════
 # ADMIN ENDPOINTS (protected by API key)
 # ═══════════════════════════════════════════
 
@@ -191,6 +211,48 @@ def scrape_status(authorized: bool = Depends(verify_admin)):
     """Check the status of the last scrape."""
     status = get_last_scrape_status()
     return status
+
+
+@app.get("/api/admin/analytics")
+def analytics_summary(authorized: bool = Depends(verify_admin), db: Session = Depends(get_db)):
+    """Return analytics summary: total events grouped by event type and page."""
+    from models import PageEvent
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc)
+
+    def count_events(since=None, event=None, page=None):
+        q = db.query(func.count(PageEvent.id))
+        if since:
+            q = q.filter(PageEvent.created_at >= since)
+        if event:
+            q = q.filter(PageEvent.event == event)
+        if page:
+            q = q.filter(PageEvent.page == page)
+        return q.scalar() or 0
+
+    # Totals
+    total        = count_events()
+    today        = count_events(since=now.replace(hour=0, minute=0, second=0, microsecond=0))
+    last_7_days  = count_events(since=now - timedelta(days=7))
+    last_30_days = count_events(since=now - timedelta(days=30))
+
+    # By event type
+    rows = db.query(PageEvent.event, func.count(PageEvent.id)).group_by(PageEvent.event).order_by(func.count(PageEvent.id).desc()).all()
+    by_event = {r[0]: r[1] for r in rows}
+
+    # By page
+    rows = db.query(PageEvent.page, func.count(PageEvent.id)).group_by(PageEvent.page).order_by(func.count(PageEvent.id).desc()).all()
+    by_page = {r[0]: r[1] for r in rows}
+
+    return {
+        "total_events": total,
+        "today": today,
+        "last_7_days": last_7_days,
+        "last_30_days": last_30_days,
+        "by_event": by_event,
+        "by_page": by_page,
+    }
 
 
 # ═══════════════════════════════════════════

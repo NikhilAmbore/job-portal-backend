@@ -43,5 +43,5 @@ def get_db():
 
 def init_db():
     """Create all tables. Called on app startup."""
-    from models import Job  # noqa: F401
+    from models import Job, PageEvent  # noqa: F401
     Base.metadata.create_all(bind=engine)

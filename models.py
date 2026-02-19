@@ -10,6 +10,20 @@ from sqlalchemy.dialects.postgresql import UUID, ARRAY, TSVECTOR
 from database import Base
 
 
+class PageEvent(Base):
+    __tablename__ = "analytics"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    event = Column(String(50), nullable=False)   # page_view | signup | login | session_start | resume_start
+    page  = Column(String(100), nullable=True)   # index | app | resume | jobs | job_detail
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("idx_analytics_event", "event"),
+        Index("idx_analytics_created", "created_at"),
+    )
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
