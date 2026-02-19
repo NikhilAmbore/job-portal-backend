@@ -77,25 +77,54 @@ def get_jobs(
     """
     query = db.query(Job).filter(Job.is_active == True)
 
-    # Full-text search — two-phase: AND (exact) then OR (expanded)
+    # Full-text search — three-phase smart search
+    # Phase 1: all words AND  →  Phase 2: domain words AND  →  Phase 3: domain words OR
     if q:
-        # Phase 1: strict AND — all words must appear
+        # Generic job-title words that are too broad to drive OR expansion alone
+        _GENERIC = {
+            "developer","engineer","programmer","manager","analyst","architect",
+            "specialist","consultant","coordinator","administrator","admin",
+            "senior","junior","lead","staff","principal","associate","intern",
+            "trainee","assistant","support","officer","director","head","chief",
+            "member","team","software","technical","technology","tech","full","stack",
+        }
+
+        def _domain_words(text: str) -> list[str]:
+            """Return only non-generic, meaningful words from the query."""
+            return [w for w in text.strip().lower().split()
+                    if len(w) > 2 and w not in _GENERIC]
+
+        # Phase 1: strict AND — every word must appear
         and_tsq = func.plainto_tsquery("english", q)
         strict_count = (
             db.query(func.count(Job.id))
             .filter(Job.is_active == True, Job.search_vector.op("@@")(and_tsq))
             .scalar()
         )
+
         if strict_count > 0:
+            # Exact match — use as-is
             query = query.filter(Job.search_vector.op("@@")(and_tsq))
         else:
-            # Phase 2: OR fallback — any meaningful word matches
-            words = [w for w in q.strip().split() if len(w) > 1]
-            if words:
-                or_phrase = " OR ".join(words)
-                or_tsq = func.websearch_to_tsquery("english", or_phrase)
-                query = query.filter(Job.search_vector.op("@@")(or_tsq))
+            # Phase 2: domain-only AND — drop generic words, keep tech/domain terms
+            domain_words = _domain_words(q)
+            if domain_words:
+                domain_and_phrase = " ".join(domain_words)
+                domain_and_tsq = func.plainto_tsquery("english", domain_and_phrase)
+                domain_and_count = (
+                    db.query(func.count(Job.id))
+                    .filter(Job.is_active == True, Job.search_vector.op("@@")(domain_and_tsq))
+                    .scalar()
+                )
+                if domain_and_count > 0:
+                    query = query.filter(Job.search_vector.op("@@")(domain_and_tsq))
+                else:
+                    # Phase 3: domain-only OR — any domain term matches
+                    or_phrase = " OR ".join(domain_words)
+                    or_tsq = func.websearch_to_tsquery("english", or_phrase)
+                    query = query.filter(Job.search_vector.op("@@")(or_tsq))
             else:
+                # All words were generic (e.g. "senior developer") — use full AND
                 query = query.filter(Job.search_vector.op("@@")(and_tsq))
 
     # Filters
